@@ -25,8 +25,6 @@ library(xgboost) # install.packages("xgboost")
 library(shiny)
 
 # Pull in data
-Sys.setenv("AWS_ACCESS_KEY_ID" = "AKIARXUIWXWHQS6F23XS",
-           "AWS_SECRET_ACCESS_KEY" = "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")
 data <- read.table(textConnection(getURL(
   "https://s3.us-east-2.amazonaws.com/ddsproject1/CaseStudy2-data.csv"
 )), sep=",", header=TRUE)
