@@ -2,6 +2,7 @@
 A repository with files related to Project #2 in the Doing Data Science course at SMU
 
 Purpose: 
+<br>
 We were given a dataset of client data from the fake company DDS Analytics.  The goal was to perform an EDA of that data, then create models to predict Attrition (Yes/No categorical variable) and Monthly Income (numeric variable).  We also needed to create a PPT, give a 
 7-8 minute presentation, create an RShiny App, create an RMarkdown file, generate predictions for provided datasets with missing Attrition and Monthly Income values, and create a webpage with all of this.
 
