@@ -1,0 +1,1375 @@
+---
+title: "DDSAnalytics Case Study"
+author: "Aaron Abromowitz"
+date: "2023-08-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction 
+This case study was to analyze data that was provided by DDSAnalytics.  They are a talent management firm for fortune 500 companies.  The dataset was information about individual employees, including salary, satisfaction ratings, gender, etc.  The task was to analyze this data, provide any useful insights, derive a model to predict Attrition (categorical) and a model to predict Monthly Salary (numeric).
+
+## Exploratory Data Analysis (EDA)
+
+### Load Packages
+Several packages will be needed for later analysis
+```{r}
+suppressMessages({ # Don't need to see the messages from loading the packages
+  library(tidyverse)
+  library(RCurl)
+  library(e1071)
+  library(caret)
+  library(mltools)
+  library(data.table)
+  library(EMT)
+  library(xgboost)
+})
+
+```
+
+### Load Dataset
+Load the dataset from AWS
+```{r}
+data <- read.table(textConnection(getURL(
+  "https://s3.us-east-2.amazonaws.com/ddsproject1/CaseStudy2-data.csv"
+)), sep=",", header=TRUE)
+
+```
+
+### Missing values
+Are there any missing values?
+```{r}
+any(is.na(data))
+
+```
+It looks like there are no NAs.  So no need to impute any data.
+
+### Summaries
+Does looking at the summary of each column show anything useful about the data?
+```{r}
+summary(data)
+
+```
+ID: Identification variable
+EmployeeCount: All 1's
+EmployeeNumber: Identification Variable
+StandardHours: All 80's
+YearsAtCompany, YearsSinceLastPromotion: Have max values that are significantly larger than the 3rd quartile value 
+
+### Relabeling Numeric Categories
+1. Remove ID, EmployeeCount, EmployeeNumber, StandardHours
+2. Replace Categorical Variables that are numeric with word equivalents (Source: https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-dataset)
+3. Set Categorical Variables to be factors
+```{r}
+# 1. Remove ID, EmployeeCount, EmployeeNumber, StandardHours
+data$ID <- c()
+data$EmployeeCount <- c()
+data$EmployeeNumber <- c()
+data$StandardHours <- c()
+
+# 2. Replace Categorical Variables that are numeric with word equivalents 
+data$Education[data$Education == 1] <- 'Below College'
+data$Education[data$Education == 2] <- 'College'
+data$Education[data$Education == 3] <- 'Bachelor'
+data$Education[data$Education == 4] <- 'Master'
+data$Education[data$Education == 5] <- 'Doctor'
+
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 1] <- 'Low'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 2] <- 'Medium'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 3] <- 'High'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 4] <- 'Very High'
+
+data$JobInvolvement[data$JobInvolvement == 1] <- 'Low'
+data$JobInvolvement[data$JobInvolvement == 2] <- 'Medium'
+data$JobInvolvement[data$JobInvolvement == 3] <- 'High'
+data$JobInvolvement[data$JobInvolvement == 4] <- 'Very High'
+
+data$JobSatisfaction[data$JobSatisfaction == 1] <- 'Low'
+data$JobSatisfaction[data$JobSatisfaction == 2] <- 'Medium'
+data$JobSatisfaction[data$JobSatisfaction == 3] <- 'High'
+data$JobSatisfaction[data$JobSatisfaction == 4] <- 'Very High'
+
+data$PerformanceRating[data$PerformanceRating == 1] <- 'Low'
+data$PerformanceRating[data$PerformanceRating == 2] <- 'Good'
+data$PerformanceRating[data$PerformanceRating == 3] <- 'Excellent'
+data$PerformanceRating[data$PerformanceRating == 4] <- 'Outstanding'
+
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 1] <- 'Low'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 2] <- 'Medium'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 3] <- 'High'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 4] <- 'Very High'
+
+data$WorkLifeBalance[data$WorkLifeBalance == 1] <- 'Bad'
+data$WorkLifeBalance[data$WorkLifeBalance == 2] <- 'Good'
+data$WorkLifeBalance[data$WorkLifeBalance == 3] <- 'Better'
+data$WorkLifeBalance[data$WorkLifeBalance == 4] <- 'Best'
+
+# 3. Set Categorical Variables to be factors
+data$Attrition <- factor(data$Attrition,levels=c("Yes","No")) # Making "Yes" the true value for bayes
+data$BusinessTravel <- as.factor(data$BusinessTravel)
+data$Department <- as.factor(data$Department)
+data$EducationField <- as.factor(data$EducationField)
+data$Gender <- as.factor(data$Gender)
+data$JobRole <- as.factor(data$JobRole)
+data$MaritalStatus <- as.factor(data$MaritalStatus)
+data$OverTime <- as.factor(data$OverTime)
+data$Education <- factor(data$Education,levels=c("Below College","College","Bachelor","Master","Doctor"))
+data$EnvironmentSatisfaction <- factor(data$EnvironmentSatisfaction,levels=c("Low","Medium","High","Very High"))
+data$JobInvolvement <- factor(data$JobInvolvement,levels=c("Low","Medium","High","Very High"))
+data$JobLevel <- as.factor(data$JobLevel)
+data$JobSatisfaction <- factor(data$JobSatisfaction,levels=c("Low","Medium","High","Very High"))
+data$PerformanceRating <- factor(data$PerformanceRating,levels=c("Low","Good","Excellent","Outstanding"))
+data$RelationshipSatisfaction <- factor(data$RelationshipSatisfaction,levels=c("Low","Medium","High","Very High"))
+data$StockOptionLevel <- as.factor(data$StockOptionLevel)
+data$WorkLifeBalance <- factor(data$WorkLifeBalance,levels=c("Bad","Good","Better","Best"))
+
+# Look at the summary again
+summary(data)
+
+```
+
+This looks better.  It also looks like we can remove the Over18 field as well.
+```{r}
+data$Over18 <- c()
+
+```
+
+### Histograms for YearsSinceLastPromotion and YearsAtCompany
+YearsSinceLastPromotion and YearsAtCompany both seemed to have a right tail. Check to make sure they don't need to be handled separately.
+```{r}
+# Try creating a histogram for YearsSinceLastPromotion
+data %>% ggplot(aes(x=YearsSinceLastPromotion)) +
+  geom_histogram(fill = "#13294b", binwidth =1)  + ylab('Count') + 
+  xlab('Years Since Last Promotion') + ggtitle('Histogram of Years Since Last Promotion') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+# Try creating a histogram for YearsAtCompany
+data %>% ggplot(aes(x=YearsAtCompany)) +
+  geom_histogram(fill = "#13294b", binwidth =1)  + ylab('Count') + 
+  xlab('Years at Company') + ggtitle('Histogram of Years at Company') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+```
+
+For YearsSinceLastPromotion, it does have a right tail, but I wouldn't call the maximum value an outlier.
+For YearsAtCompany, the 40 at the end is by itself, and there are a few values around 30 that are capped.  It could be worthwhile to create a new variable that caps out at 30, to see if that performs any differently.
+
+```{r}
+data$YearsAtCompany_Capped <- pmin(data$YearsAtCompany,30)
+
+# Plot it
+data %>% ggplot(aes(x=YearsAtCompany_Capped)) +
+  geom_histogram(fill = "#13294b", binwidth =1)  + ylab('Count') + 
+  xlab('Years at Company') + ggtitle('Histogram of Years at Company - Capped') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+```
+
+### See if any interesting variables are correlated
+R has a cor.test function, which uses one of Pearson's product moment correlation coefficient, Kendall's τ or Spearman's ρ as appropriate. Let's see if there are any interesting correlation values.
+
+```{r}
+nvars <- ncol(data)
+corrs <- data.frame(matrix(ncol = 3, nrow = nvars*nvars))
+colnames(corrs) <- c('var1', 'var2', 'corr')
+rowNum <- 1
+for (ii in 1:nvars){
+  for (jj in 1:nvars){
+    var1 <- unclass(data[,ii])
+    var2 <- unclass(data[,jj])
+    if (length(unique(var1)) == 1 || length(unique(var2)) == 1){
+      corr <- 0
+    } else{
+      corr <- cor.test(var1,var2)
+    }
+    corrs$var1[rowNum] <- names(data[ii])
+    corrs$var2[rowNum] <- names(data[jj])
+    corrs$corr[rowNum] <- as.numeric(corr$estimate)
+    rowNum <- rowNum + 1
+  }
+}
+
+```
+Interesting relationships:
+1. Martial Status and Stock Option Level
+2. Attrition and OverTime
+3. Age and Education
+
+### Plot the interestsing relationships
+We should see if these relationships with relatively high correlations are shown visually
+```{r}
+# 1. Martial Status and Stock Option Level
+data %>% ggplot(aes(x=StockOptionLevel, fill=MaritalStatus)) +
+  geom_bar() + xlab('Stock Option Level') + ylab('Count') + 
+  ggtitle('Stock Option Level by Marital Status') +
+  scale_fill_manual("Marital Status", 
+    values = c("Single" = "#13294b", "Divorced" = "lightblue", "Married" = "blue")) +
+    theme(plot.background = element_rect("#dbdfdf"),
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+          axis.text.y = element_text(color = "#13294b",size = 14), 
+          axis.title.x = element_text(color = "#13294b",size = 16), 
+          axis.title.y =element_text(color = "#13294b",size = 16), 
+          plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+All Single People have Stock Level 0.  I wonder how Stock Level compares to Attrition?
+<br>
+<br>
+
+```{r}
+# How does this compare to Attrition?
+data %>% ggplot(aes(x=StockOptionLevel, fill=Attrition)) +
+  geom_bar() + xlab('Stock Option Level') + ylab('Count') + 
+  ggtitle('Stock Option Level by Attrition') +
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+```
+
+It does look Stock Level 0 is associated with higher Attrition.
+<br>
+<br>
+
+```{r}
+# 2. Attrition and OverTime
+data %>% ggplot(aes(x=OverTime, fill=Attrition)) +
+  geom_bar() + xlab('Overtime') + ylab('Count') + 
+  ggtitle('Overtime by Attrition') +
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+```
+
+The amount of Attrition is the same for overtime and no overtime, but how does that compare as a percentage?
+<br>
+<br>
+
+```{r}
+# Try plotting percentage
+data %>% ggplot(aes(x=OverTime, fill=Attrition)) +
+  geom_bar(position = "fill") + xlab('Overtime') + ylab('Percent') + 
+  ggtitle('Overtime by Attrition Percentage') +
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+```
+
+The relationship is much clearer when you look at the difference by Percentage.
+<br>
+<br>
+
+```{r}
+# 3. Age and Education
+data %>% ggplot(aes(x=Age)) +
+  geom_histogram(fill="#13294b") + xlab('Age') + ylab('Count') + 
+  ggtitle('Age vs Education Level') +
+  facet_wrap(~ Education, ncol=1) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 7), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+Age seems to go up slightly with Education level.  This makes some sense, but the majority of ages overlap.  For example, the mode for Below College is around 25, but there are Masters graduates at that age as well.
+
+## Attrition Model
+I already found highly correlated variables.  First I will look at a few variables that are highly correlated with Attrition.  Then try to create a model to predict Attrition using these variables. 
+
+### Looking at Categorical Variables associated with Attrition
+We have correlations between Attrition and other variables already.  Let's plot some of the more highly correlated Variables.
+<br>
+<br>
+Let's start off with Attrition vs Job Involvement
+```{r}
+# Plot Attrition vs JobInvolvement
+data %>% ggplot(aes(x=JobInvolvement,fill=Attrition)) +
+  geom_bar(position="fill") + xlab('Job Involvement') + ylab('Percent') + 
+  ggtitle('Attrition based on Job Involvement') +
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+<br>
+Then Attrition vs Job Level
+```{r}
+# Plot Attrition vs JobLevel
+data %>% ggplot(aes(x=JobLevel,fill=Attrition)) +
+  geom_bar(position="fill") + xlab('Job Level') + ylab('Percent') + 
+  ggtitle('Attrition based on Job Level') +
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+<br>
+Let's also look at Attrition vs Marital Status, since it has a high correlation.
+```{r}
+# Plot Attrition vs MaritalStatus
+data %>% ggplot(aes(x=MaritalStatus,fill=Attrition)) +
+  geom_bar(position="fill") + xlab('Marital lStatus') + ylab('Percent') + 
+  ggtitle('Attrition based on Marital Status') +
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+### Looking at Nuermical Variables associated with Attrition
+```{r warning=FALSE, message=FALSE}
+# Plot Attrition vs TotalWorkingYears
+data %>% ggplot(aes(x=TotalWorkingYears)) +
+  geom_histogram(fill="#13294b") + xlab('Attrition') + ylab('Count') + 
+  ggtitle('Attrition vs Total Working Years') +
+  facet_wrap(~ Attrition, ncol=1, scales='free') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 7), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+It looks like Attrition = Yes has more values to the lower levels.
+<br>
+<br>
+```{r warning=FALSE, message=FALSE}
+# Plot Attrition vs MonthlyIncome
+data %>% ggplot(aes(x=MonthlyIncome)) +
+  geom_histogram(fill="#13294b") + xlab('Attrition') + ylab('Count') + 
+  ggtitle('Attrition vs Monthly Income') +
+  facet_wrap(~ Attrition, ncol=1, scales='free') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 7), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+It looks like there are less high monthly incomes for Attrition = Yes.
+
+### Top 3 Factors
+Based on the cor.test values, the top 3 factors are OverTime, MaritalStatus, and JobInvolvement. Looking at the plots of those, along with the plots of some of the numeric variables, I feel like the Categorical variables contribute more towards turnover.  So those three variables seem to be good candidates for the top three variables that contribute to turnover.
+
+### Creating Extra variables
+I created extra variables using 3 approaches:
+1. Squaring the numeric variables
+2. One Hot Encoding the categorical variables
+3. Crossing all the variables
+```{r warning=FALSE, message=FALSE}
+
+# Create var lists
+cat_vars <- c('BusinessTravel','Department','Education','EducationField',
+              'EnvironmentSatisfaction','Gender','JobInvolvement','JobLevel','JobRole',
+              'JobSatisfaction','MaritalStatus','OverTime','PerformanceRating',
+              'RelationshipSatisfaction','StockOptionLevel','WorkLifeBalance')
+num_vars <- c('Age','DailyRate','DistanceFromHome','HourlyRate','MonthlyIncome',
+              'MonthlyRate','NumCompaniesWorked','PercentSalaryHike','TotalWorkingYears',
+              'TrainingTimesLastYear','YearsAtCompany','YearsAtCompany_Capped',
+              'YearsInCurrentRole','YearsSinceLastPromotion','YearsWithCurrManager')
+
+# Get onehot encoded variables
+before_onehot <- data
+data <- one_hot(as.data.table(data))
+data <- as.data.frame(data)
+data$Attrition <- before_onehot$Attrition
+data$Attrition_Yes <- c()
+data$Attrition_No <- c()
+nvar <- length(cat_vars)
+for (ii in 1:nvar){
+  var <- cat_vars[ii]
+  data[,var] <- before_onehot[,var]
+}
+names(data) <- gsub(' ','_',names(data))
+names(data) <- gsub('&','AND',names(data))
+names(data) <- gsub('-','_',names(data))
+col_names <- names(data)
+onehot_vars <- col_names[grepl('_', names(data))]
+onehot_vars <- onehot_vars[!grepl('squared', onehot_vars)]
+
+# Make cross products of variables
+data_before_cross <- data
+to_cross_vars <- c(num_vars,onehot_vars)
+nvars <- length(to_cross_vars)
+cross_vars <- c()
+for (ii in 1:nvars){
+  for(jj in 1:nvars){
+    if (ii<jj){
+      var1 <- to_cross_vars[ii]
+      var2 <- to_cross_vars[jj]
+      new_col <- data[,var1]*data[,var2]
+      if(sum(new_col)!=0){
+        new_var <- paste(var1,var2,sep="X")
+        data[,new_var]<-new_col
+        cross_vars <- c(cross_vars,new_var)
+      }
+    }
+  }
+}
+```
+
+### Looking at Created Variables
+```{r warning=FALSE, message=FALSE}
+# Plot Attrition vs JobLevel_1XOverTime_Yes
+data %>% ggplot(aes(x=JobLevel_1XOverTime_Yes,fill=Attrition)) +
+  geom_bar(position="fill") + xlab('Job Level = 1 X Overtime = Yes') + ylab('Percent') + 
+  ggtitle('Attrition by Created Variable JobLevel_1XOverTime_Yes') + 
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +
+  scale_x_discrete(breaks=c(0,1),limits=c(0,1)) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=0.5, color = "#13294b",size = 14),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 14))
+
+# Plot Attrition vs OverTime_YesXStockOptionLevel_0
+data %>% ggplot(aes(x=OverTime_YesXStockOptionLevel_0,fill=Attrition)) +
+  geom_bar(position="fill") + xlab('Overtime = Yes X Stock Option Level = 0') + ylab('Percent') + 
+  ggtitle('Attrition by Created Variable OverTime_YesXStockOptionLevel_0') + 
+  scale_fill_manual("Attrition", 
+                    values = c("Yes" = "blue", "No" = "#13294b")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +
+  scale_x_discrete(breaks=c(0,1),limits=c(0,1)) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=0.5, color = "#13294b",size = 14),
+        axis.text.y = element_text(color = "#13294b",size = 14), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 14))
+```
+
+Both of these crossed variables have 50% Attrition whenever they're true.  They could definitely be very predictive.
+
+### Creating and testing out simple models
+First, I will try using 3 variables with a Naive Bayes model.  Then I will see how well it predicts by measuring its Sensitivity and Specificity.
+NOTE: I'm not running the code because it takes a while
+```{r, eval=FALSE}
+# Setting up parameters
+seed <- 10
+prop_test <- .1
+num_tests <- 200
+formula_str <- 'Attrition ~ JobLevel_1XOverTime_Yes+OverTime_YesXStockOptionLevel_0+MaritalStatus_SingleXOverTime_Yes'
+thresh <- .6
+
+metric <- 0
+num_passed <- 0
+set.seed(seed) # re-setting the seed for some sort of predictability
+for (jj in 1:num_tests){
+  # Creating training and test data
+  indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+  validation = data[indices,]
+  train = data[-indices,]
+  
+  # Creating the model using training data
+  model <- naiveBayes(as.formula(formula_str), data = train)
+  
+  # Testing the model using test data
+  pred <- predict(model, validation)
+  cmBayes <- confusionMatrix(table(pred,validation$Attrition))
+  
+  # Determining how well the model did
+  sens <- as.numeric(cmBayes$byClass["Sensitivity"])
+  if(is.na(sens)) {
+    sens<-0
+  }
+  spec <- as.numeric(cmBayes$byClass["Specificity"])
+  if(is.na(spec)){
+    spec<-0
+  }
+  if(sens>thresh && spec>thresh) {
+    num_passed <- num_passed + 1
+  }
+  metric <- metric + sens + spec
+}
+
+# Outputting metrics
+metric / num_tests
+num_passed
+
+```
+For 3 of the original variables, the metric was 1.082 and 0 passed.  For 3 created variables, the metric was 1.409 and 56 passed.
+<br>
+<br>
+
+Then I will try the same thing with KNN models.
+```{r, eval=FALSE}
+seed <- 10
+prop_test <- .1
+num_tests <- 200
+vars <- c('JobLevel_1XOverTime_Yes','OverTime_YesXStockOptionLevel_0','MaritalStatus_SingleXOverTime_Yes',)
+thresh <- .6
+k_to_use <- 13
+
+metric <- 0
+num_passed <- 0
+set.seed(seed) # re-setting the seed for some sort of predictability
+for (jj in 1:num_tests){
+  # Creating training and test data
+  indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+  validation = data[indices,]
+  train = data[-indices,]
+  
+  # Creating the model using training data
+  classifications <- knn(train[,vars], # you might need at least 2 variables
+                         validation[,vars],
+                         train$Attrition, prob = TRUE, k = k_to_use)
+  
+  # Testing the model using test data
+  CM = confusionMatrix(table(validation$Attrition,classifications))
+  
+  # Determining how well the model did
+  sens <- as.numeric(CM$byClass["Sensitivity"])
+  if(is.na(sens)) {
+    sens<-0
+  }
+  spec <- as.numeric(CM$byClass["Specificity"])
+  if(is.na(spec)){
+    spec<-0
+  }
+  if(sens>thresh && spec>thresh) {
+    num_passed <- num_passed + 1
+  }
+  metric <- metric + sens + spec
+}
+
+# Outputting metrics
+metric / num_tests
+num_passed
+
+```
+
+For 3 of the original variables, the metric was 1.091 and 14 passed.  For 3 created variables, the metric was 1.572 and 135 passed.  At this point, KNN is performing better than Naive Bayes.
+
+### Creating a more complex model
+I wanted to see what happened if I tried using more variables.  This can be dangerous because of overfitting, but it can also do much better.  The approach I took was:
+1. Sorting variables based on p-score when using the cor.test function in r
+2. Going through those variables
+2a. Adding each to the model
+2b. Seeing if the metric increased
+2c. If it did, add the variable to the model
+3. Output the (potentially lengthy) formula
+I made sure that the metric was increased a decent amount, and that the p-values weren't too high, in order to keep the list of variables to a more reasonable amount.
+```{r}
+# This function goes through all of the variables in the p-value order, adds them to a Naive Bayes model, and sees if they increase the predictiveness of the model enough to add the variables permanently.
+add_vars_nb <- function(data, all_vars, seed, prop_test, thresh, num_tests, num_no_change, txt_file){
+  # First get a list of the p-values
+  var_df <- data.frame(Variables=all_vars)
+  var_df$p <- 0
+  var_df$metric <- 0
+  var_df$num_passed <- 0
+  var_df$to_use <- 0
+  var_df$curr_formula <- ""
+  num_since_last_change <- 0
+  nvar <- length(all_vars)
+  for(ii in 1:nvar){
+    var<-all_vars[ii]
+    test <- cor.test(unclass(data[,'Attrition']),unclass(data[,var]))
+    var_df$p[ii] <- test$p.value
+  }
+  
+  # Sort the p-values
+  sort_order <- order(var_df$p,decreasing = FALSE)
+  
+  # Loop through all of the columns, add the next variable to the list
+  vars_to_use <- c()
+  best_passed <- 0
+  best_metric <- 0
+  for (ii in 1:nvar){
+    var<-all_vars[sort_order[ii]]
+    curr_p <- var_df$p[sort_order[ii]]
+    if(curr_p > 0.001){ # Don't want the variables to not be super predictive
+      break
+    }
+    if(sum(data[,var]!=0)<length(data[,var])*0.05){
+      next # Don't want too few numbers in the variable, since that could make it overfit on the variable
+    }
+    
+    vars_to_use_loop <- c(vars_to_use,var)
+    formula_str <- paste("Attrition ~ ", paste(vars_to_use_loop,collapse="+"))
+    formula_obj <- as.formula(formula_str)
+    
+    # Running several tests, to make sure that the model creation formula creates good models over different training and test sets
+    metric <- 0
+    num_passed <- 0
+    set.seed(seed) # re-setting the seed for some sort of predictability
+    for (jj in 1:num_tests){
+      
+      # Create training and test sets
+      indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+      validation = data[indices,]
+      train = data[-indices,]
+      
+      # Create the model
+      model <- naiveBayes(formula_obj, data = train)
+      
+      # Test the model
+      pred <- predict(model, validation)
+      cmBayes <- confusionMatrix(table(pred,validation$Attrition))
+      sens <- as.numeric(cmBayes$byClass["Sensitivity"])
+      if(is.na(sens)) {
+        sens<-0
+      }
+      spec <- as.numeric(cmBayes$byClass["Specificity"])
+      if(is.na(spec)){
+        spec<-0
+      }
+      if(sens>thresh && spec>thresh) {
+        num_passed <- num_passed + 1
+      }
+      metric <- metric + sens + spec
+      
+    }
+    metric <- metric / num_tests
+    var_df$metric[var_df$Variable==var] <- metric
+    var_df$num_passed[var_df$Variable==var] <- num_passed
+    
+    # Check if that variable should be added
+    if(best_metric+0.01<metric || num_passed<=num_tests*.01){
+      best_passed = num_passed
+      best_metric <- metric
+      vars_to_use <- c(vars_to_use,var)
+      var_df$to_use[var_df$Variable==var] <- 1
+      var_df$curr_formula[var_df$Variable==var] <- formula_str
+      num_since_last_change <- 0
+      
+      # Save off the formula in a file so you can view / copy and paste it later.
+      writeLines(paste('num: ',ii,' var: ',var,' metric: ', metric,' num_passed: ', num_passed, 
+                       ' formula_str: ',formula_str,sep=""),
+                 txt_file)
+    }
+    
+    # Print something to the screen to see general progress
+    print(paste('num: ',ii,' var: ',var,' metric: ', metric,' num_passed: ', num_passed,sep=""))
+    
+    # If the loop has been going on for too long, just break out of it
+    num_since_last_change <- num_since_last_change + 1
+    if(num_since_last_change == num_no_change){
+      break
+    }
+  }
+  
+  # Output the var_df
+  var_df
+}
+
+```
+
+<br>
+Create the same sort of function, but for the KNN model
+```{r}
+# Similar to the above function, fbut for KNN
+add_vars_knn <- function(data, all_vars, seed, prop_test, thresh, num_tests, num_no_change, start_formula, start_num, txt_file, start_best){
+  # First get a list of the p-values
+  var_df <- data.frame(Variables=all_vars)
+  var_df$num <- 0
+  var_df$p <- 0
+  var_df$metric <- 0
+  var_df$num_passed <- 0
+  var_df$k <- 0
+  var_df$to_use <- 0
+  var_df$curr_formula <- ""
+  num_since_last_change <- 0
+  nvar <- length(all_vars)
+  for(ii in 1:nvar){
+    var<-all_vars[ii]
+    test <- cor.test(unclass(data[,'Attrition']),unclass(data[,var]))
+    var_df$p[ii] <- test$p.value
+  }
+  
+  # Sort the p-values
+  sort_order <- order(var_df$p,decreasing = FALSE)
+  
+  # Running several tests, to make sure that the model creation formula creates good models over different training and test sets
+  if (start_formula==''){
+    vars_to_use <- c()
+  } else {
+    vars_to_use <- unlist(strsplit(start_formula, "\\+"))
+  }
+  best_passed <- 0
+  best_metric <- start_best
+  for (ii in start_num:nvar){
+    var<-all_vars[sort_order[ii]]
+    vars_to_use_loop <- c(vars_to_use,var)
+    curr_p <- var_df$p[sort_order[ii]]
+    if(curr_p > 0.001){ # Don't want the variables to not be super predictive
+      break
+    }
+    if(sum(data[,var]!=0)<length(data[,var])*0.05){
+      next # Don't want too few numbers in the variable, since that could make it overfit on the variable
+    }
+    if(class(data[,var]) == 'factor'){
+      next # KNN only really handles numbers
+    }
+    
+    # KNN can be use for different k values, so try out a few for each new variable.
+    k_met <- 0
+    k_num_passed <- 0
+    k_best <- 3
+    set.seed(seed) # re-setting the seed for some sort of predictability
+    for (kk in c(3,5,7,9,11,13,15)){
+      print(paste('k is ',kk,sep=""))
+      metric <- 0
+      num_passed <- 0
+      for (jj in 1:num_tests){
+        indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+        validation = data[indices,]
+        train = data[-indices,]
+        classifications <- knn(train[,vars_to_use_loop], # you might need at least 2 variables
+                               validation[,vars_to_use_loop],
+                               train$Attrition, prob = TRUE, k = kk)
+        CM = confusionMatrix(table(validation$Attrition,classifications))
+        sens <- as.numeric(CM$byClass["Sensitivity"])
+        if(is.na(sens)) {
+          sens<-0
+        }
+        spec <- as.numeric(CM$byClass["Specificity"])
+        if(is.na(spec)){
+          spec<-0
+        }
+        if(sens>thresh && spec>thresh) {
+          num_passed <- num_passed + 1
+        }
+        metric <- metric + sens + spec
+      }
+      
+      metric <- metric / num_tests
+      if(k_met<metric){
+        k_best <- kk
+        k_met <- metric
+        k_num_passed <- num_passed
+      }
+    }
+    var_df$metric[var_df$Variable==var] <- k_met
+    var_df$num_passed[var_df$Variable==var] <- k_num_passed
+    var_df$num[var_df$Variable==var] <- ii
+    
+    # Check if that variable should be added
+    if(best_metric+0.01<k_met || k_num_passed<=num_tests*.01){
+      best_passed = k_num_passed
+      best_metric <- k_met
+      vars_to_use <- c(vars_to_use,var)
+      var_df$to_use[var_df$Variable==var] <- 1
+      var_df$curr_formula[var_df$Variable==var] <- paste(vars_to_use,collapse="+")
+      var_df$k[var_df$Variable==var] <- k_best
+      num_since_last_change <- 0
+      file_str <- paste(readLines(txt_file), collapse="\n")
+      writeLines(paste(file_str,"\n",'num: ',ii,' var: ',var, ' k: ', k_best,
+                       ' metric: ', metric, ' num_passed: ', num_passed, 
+                       ' formula_str: ',paste(vars_to_use,collapse="+"),sep=""),
+                 txt_file)
+    }
+    
+    # Print something to the screen to see general progress
+    print(paste('num: ',ii,' var: ',var,' metric: ', metric,
+                ' num_since_last_change: ',num_since_last_change,
+                ' num_passed: ', num_passed, " k: ", k_best, sep=""))
+    
+    # If the loop has been going on for too long, just break out of it
+    num_since_last_change <- num_since_last_change + 1
+    if(num_since_last_change == num_no_change){
+      break
+    }
+  }
+  
+  # Output the var_df
+  var_df
+}
+
+```
+
+After these models were created, I did the same approach as above for testing them.  For Naive Bayes, the metric was 1.661 and 195 out of the 200 tests passed.  For KNN, the metric was 1.671 and 164 out of the 200 passed.  So KNN was slightly better at the overall metric, but Naive Bayes passed more often.
+
+## Monthly Income Model
+I'll take a similar approach to the model for attrition.  First I will look at a few variables that are highly correlated with Monthly Income.  Then I'll try to create a linear model to predict Monthly Income using these variables.
+
+### First re-create the data table with all the additional variables
+```{r}
+data <- read.table(textConnection(getURL(
+  "https://s3.us-east-2.amazonaws.com/ddsproject1/CaseStudy2-data.csv"
+)), sep=",", header=TRUE)
+
+# Reset some of the numeric looking variables to words.
+data$Education[data$Education == 1] <- 'Below College'
+data$Education[data$Education == 2] <- 'College'
+data$Education[data$Education == 3] <- 'Bachelor'
+data$Education[data$Education == 4] <- 'Master'
+data$Education[data$Education == 5] <- 'Doctor'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 1] <- 'Low'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 2] <- 'Medium'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 3] <- 'High'
+data$EnvironmentSatisfaction[data$EnvironmentSatisfaction == 4] <- 'Very High'
+data$JobInvolvement[data$JobInvolvement == 1] <- 'Low'
+data$JobInvolvement[data$JobInvolvement == 2] <- 'Medium'
+data$JobInvolvement[data$JobInvolvement == 3] <- 'High'
+data$JobInvolvement[data$JobInvolvement == 4] <- 'Very High'
+data$JobSatisfaction[data$JobSatisfaction == 1] <- 'Low'
+data$JobSatisfaction[data$JobSatisfaction == 2] <- 'Medium'
+data$JobSatisfaction[data$JobSatisfaction == 3] <- 'High'
+data$JobSatisfaction[data$JobSatisfaction == 4] <- 'Very High'
+data$PerformanceRating[data$PerformanceRating == 1] <- 'Low'
+data$PerformanceRating[data$PerformanceRating == 2] <- 'Good'
+data$PerformanceRating[data$PerformanceRating == 3] <- 'Excellent'
+data$PerformanceRating[data$PerformanceRating == 4] <- 'Outstanding'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 1] <- 'Low'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 2] <- 'Medium'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 3] <- 'High'
+data$RelationshipSatisfaction[data$RelationshipSatisfaction == 4] <- 'Very High'
+data$WorkLifeBalance[data$WorkLifeBalance == 1] <- 'Bad'
+data$WorkLifeBalance[data$WorkLifeBalance == 2] <- 'Good'
+data$WorkLifeBalance[data$WorkLifeBalance == 3] <- 'Better'
+data$WorkLifeBalance[data$WorkLifeBalance == 4] <- 'Best'
+
+# Set variables to factors
+data_original <- data
+data$Attrition <- factor(data$Attrition,levels=c("Yes","No")) # Making "Yes" the true value for bayes
+data$BusinessTravel <- as.factor(data$BusinessTravel)
+data$Department <- as.factor(data$Department)
+data$EducationField <- as.factor(data$EducationField)
+data$Gender <- as.factor(data$Gender)
+data$JobRole <- as.factor(data$JobRole)
+data$MaritalStatus <- as.factor(data$MaritalStatus)
+data$OverTime <- as.factor(data$OverTime)
+data$Education <- factor(data$Education,levels=c("Below College","College","Bachelor","Master","Doctor"))
+data$EnvironmentSatisfaction <- factor(data$EnvironmentSatisfaction,levels=c("Low","Medium","High","Very High"))
+data$JobInvolvement <- factor(data$JobInvolvement,levels=c("Low","Medium","High","Very High"))
+data$JobLevel <- as.factor(data$JobLevel)
+data$JobSatisfaction <- factor(data$JobSatisfaction,levels=c("Low","Medium","High","Very High"))
+data$PerformanceRating <- factor(data$PerformanceRating,levels=c("Low","Good","Excellent","Outstanding"))
+data$RelationshipSatisfaction <- factor(data$RelationshipSatisfaction,levels=c("Low","Medium","High","Very High"))
+data$StockOptionLevel <- as.factor(data$StockOptionLevel)
+data$WorkLifeBalance <- factor(data$WorkLifeBalance,levels=c("Bad","Good","Better","Best"))
+
+# Make a YearsAtCompany_Capped variable and cap it at 30
+data$YearsAtCompany_Capped <- pmin(data$YearsAtCompany,30)
+
+# Create lists of the variables
+# List all the categorical and numeric variables
+cat_vars <- c('Attrition','BusinessTravel','Department','Education','EducationField',
+              'EnvironmentSatisfaction','Gender','JobInvolvement','JobLevel','JobRole',
+              'JobSatisfaction','MaritalStatus','OverTime','PerformanceRating',
+              'RelationshipSatisfaction','StockOptionLevel','WorkLifeBalance')
+num_vars <- c('Age','DailyRate','DistanceFromHome','HourlyRate','MonthlyRate',
+              'NumCompaniesWorked','PercentSalaryHike','TotalWorkingYears',
+              'TrainingTimesLastYear', 'YearsAtCompany','YearsInCurrentRole',
+              'YearsSinceLastPromotion','YearsWithCurrManager', 'YearsAtCompany_Capped')
+
+# Create square vars
+nvars <- length(num_vars)
+squared_vars <- c()
+data_no_squared <- data
+for (ii in 1:nvars){
+  var <- num_vars[ii]
+  var_squared <- paste(var,"_squared",sep="")
+  data[,var_squared]<-data[,var]*data[,var]
+  squared_vars <- c(squared_vars,var_squared)
+}
+
+# Get onehot encoded variables
+before_onehot <- data
+data <- one_hot(as.data.table(data))
+data <- as.data.frame(data)
+nvar <- length(cat_vars)
+for (ii in 1:nvar){
+  var <- cat_vars[ii]
+  data[,var] <- before_onehot[,var]
+}
+names(data) <- gsub(' ','_',names(data))
+names(data) <- gsub('&','AND',names(data))
+names(data) <- gsub('-','_',names(data))
+col_names <- names(data)
+onehot_vars <- col_names[grepl('_', names(data))]
+onehot_vars <- onehot_vars[!grepl('squared', onehot_vars)]
+
+# Make cross products of variables
+data_before_cross <- data
+to_cross_vars <- c(num_vars,onehot_vars)
+nvars <- length(to_cross_vars)
+cross_vars <- c()
+for (ii in 1:nvars){
+  for(jj in 1:nvars){
+    if (ii<jj){
+      var1 <- to_cross_vars[ii]
+      var2 <- to_cross_vars[jj]
+      new_col <- data[,var1]*data[,var2]
+      if(sum(new_col)!=0){
+        new_var <- paste(var1,var2,sep="X")
+        data[,new_var]<-new_col
+        cross_vars <- c(cross_vars,new_var)
+      }
+    }
+  }
+}
+
+# Combine all the variables
+all_vars <- c(cat_vars, num_vars, squared_vars, onehot_vars, cross_vars)
+```
+
+### Plot Monthly Income vs Categorical Variables
+```{r, warning=FALSE, message=FALSE}
+# Plot Monthly Income vs Job Level
+data %>% ggplot(aes(x=MonthlyIncome,fill=JobLevel)) +
+  geom_histogram() + xlab('Monthly Income') + ylab('Count') + 
+  ggtitle('Monthly Income vs Job Level') +
+  scale_fill_manual("Attrition", 
+                    values = c("1" = "#13294b", "2" = "darkblue", "3" = "blue", 
+                               "4" = "cornflowerblue", "5" = "lightblue")) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 7), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+Monthly Income should be extremely correlated with Job Level, since Job Level is how the bands for salary are decided upon by companies.
+<br>
+<br>
+
+```{r, warning=FALSE, message=FALSE}
+# Plot Monthly Income vs Education
+data %>% ggplot(aes(x=MonthlyIncome)) +
+  geom_histogram(fill="#13294b") + xlab('Monthly Income') + ylab('Count') + 
+  ggtitle('Monthly Income vs Education Level') +
+  facet_wrap(~ Education, ncol=1, scales='free_y') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 7), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+These look surprisingly uncorrelated.
+
+### Plot Monthly Income vs Numeric Variables
+```{r, warning=FALSE, message=FALSE}
+# Plot Monthly Income vs Total Working Years
+data %>% ggplot(aes(x=TotalWorkingYears, y=MonthlyIncome)) +
+  geom_point(color="#13294b") + xlab('Total Working Years') + ylab('Monthly Income') + 
+  ggtitle('Monthly Income vs Total Working Years') +
+  geom_smooth(method = "lm", formula = y ~ x) +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 10), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+Monthly Income appears to be correlated with Total Working Years, which makes sense.  Generally you have a lower salary at the beginning of your career.
+<br>
+<br>
+
+```{r, warning=FALSE, message=FALSE}
+# Plot Monthly Income vs Years Since Last Promotion
+data %>% ggplot(aes(x=YearsSinceLastPromotion, y=MonthlyIncome)) +
+  geom_point(color="#13294b") + xlab('Years Since Last Promotion') + ylab('Monthly Income') + 
+  ggtitle('Monthly Income vs Years Since Last Promotion') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 10), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+There appears to be more of a concentration of points in the bottom left, but they are fairly evenly distributed throughout.
+
+### Plot Monthly Income vs Created Variables
+```{r, warning=FALSE, message=FALSE}
+# Plot MonthlyIncome vs AgeXTotalWorkingYears
+data %>% ggplot(aes(x=AgeXTotalWorkingYears, y=MonthlyIncome)) +
+  geom_point(color="#13294b") + xlab('Age X Total Working Years') + ylab('Monthly Income') + 
+  ggtitle('Monthly Income by AgeXTotalWorkingYears') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 10), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+
+# Plot MonthlyIncome vs TotalWorkingYears_squared
+data %>% ggplot(aes(x=TotalWorkingYears_squared, y=MonthlyIncome)) +
+  geom_point(color="#13294b") + xlab('Total Working Years Squared') + ylab('Monthly Income') + 
+  ggtitle('Monthly Income by Total Working Years Squared') +
+  theme(plot.background = element_rect("#dbdfdf"),
+        axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1, color = "#13294b",size = 10),
+        axis.text.y = element_text(color = "#13294b",size = 10), 
+        axis.title.x = element_text(color = "#13294b",size = 16), 
+        axis.title.y =element_text(color = "#13294b",size = 16), 
+        plot.title  = element_text(color = "#13294b",size = 18))
+```
+
+These look similar to the relationship between Monthly Income and Total Working Years, but with slightly less correlation.  For Monthly Income, there isn't as strong of relationship between the Created Variables.
+
+### Creating and testing out simple models
+Similar to the Attrition Models, I started with some simple models based on variables with high correlation to Monthly Income.  I then tested them using RMSE as a metric.
+```{r, eval=FALSE}
+# Setting up parameters
+seed <- 20
+prop_test <- .1
+num_tests <- 200
+formula_str <- 'MonthlyIncome ~  JobLevel+TotalWorkingYears'
+thresh <- 30000
+
+metric <- 0
+num_passed <- 0
+set.seed(seed) # re-setting the seed for some sort of predictability
+for (jj in 1:num_tests){
+  # Creating training and test data
+  indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+  validation = data[indices,]
+  train = data[-indices,]
+  
+  # Creating the model using training data
+  model <- lm(as.formula(formula_str), data = train)
+  
+  # Testing the model using test data
+  pred <- predict(model, validation)
+  
+  # Determining how well the model did
+  rmse <- sqrt(sum((pred-as.numeric(validation[,"MonthlyIncome"]))^2)/nrow(validation))
+  if(rmse<thresh){
+    num_passed <- num_passed+1
+  }
+  metric <- metric + rmse
+}
+
+# Outputting metrics
+metric / num_tests
+num_passed
+
+```
+
+All tests got below the 3,000 threshold for every single test, so num_passed was always 200. Average RMSE was:
+1. JobLevel = 1262.0
+2. JobLevel + TotalWorkingYears = 1255.4
+3. JobLevel + TotalWorkingYears + Attrition = 1255.3
+4. JobLevel + TotalWorkingYears + AgeXTotalWorkingYears = 1254.8
+
+### Creating a more complex model
+I'm using a similar approach to creating the more complext model for Naive Bayes and KNN.
+```{r}
+add_vars_reg <- function(data, all_vars, seed, prop_test, thresh, num_tests, num_no_change, num_models, start_formula, start_num, txt_file){
+  
+  # First get a list of the p-values
+  var_df <- data.frame(Variables=all_vars)
+  var_df$num <- 0
+  var_df$p <- 0
+  var_df$metric <- 0
+  var_df$num_passed <- 0
+  var_df$to_use <- 0
+  var_df$curr_formula <- ""
+  nvar <- length(all_vars)
+  for(ii in 1:nvar){
+    var<-all_vars[ii]
+    test <- cor.test(unclass(data[,'MonthlyIncome']),unclass(data[,var]))
+    var_df$p[ii] <- test$p.value
+  }
+  var_df$p[is.na(var_df$p)] <- 1
+  
+  # Sort the p-values
+  sort_order <- order(var_df$p,decreasing = FALSE)
+  
+  # Loop through all of the columns, add the next variable to the list
+  if (start_formula=='') {
+    vars_to_use <- c()
+  } else {
+    vars_to_use <- strsplit(start_formula, "~")[[1]][2]
+  }
+  best_passed <- 0
+  best_metric <- 1000000000
+  for (ii in start_num:nvar){
+    var<-all_vars[sort_order[ii]]
+    curr_p <- var_df$p[sort_order[ii]]
+    if(curr_p > 0.001){ # Don't want the variables to not be super predictive
+      break
+    }
+    if(sum(data[,var]!=0)<length(data[,var])*0.05){
+      next # Don't want too few values, since using that variable could then lead to overfitting
+    }
+    
+    vars_to_use_loop <- c(vars_to_use,var)
+    formula_str <- paste("MonthlyIncome ~ ", paste(vars_to_use_loop,collapse="+"))
+    formula_obj <- as.formula(formula_str)
+    
+    # Perform several tests and get the average RMSE
+    metric <- 0
+    num_passed <- 0
+    set.seed(seed) # re-setting the seed for some sort of predictability
+    for (jj in 1:num_tests){
+      
+      # Create training and test data
+      indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+      validation = data[indices,]
+      train = data[-indices,]
+      
+      # Create model
+      model <- lm(formula_obj, data = train)
+      
+      # Test model
+      pred <- predict(model, validation)
+      rmse <- sqrt(sum((pred-as.numeric(validation[,"MonthlyIncome"]))^2)/nrow(validation))
+      if(rmse<thresh){
+        num_passed <- num_passed+1
+      }
+      metric <- metric + rmse
+      
+    }
+    metric <- metric / num_tests
+    var_df$metric[var_df$Variable==var] <- metric
+    var_df$num_passed[var_df$Variable==var] <- num_passed
+    
+    # Check if that variable should be added
+    if(best_metric>(metric+1)){
+      best_passed = num_passed
+      best_metric <- metric
+      vars_to_use <- c(vars_to_use,var)
+      var_df$to_use[var_df$Variable==var] <- 1
+      var_df$curr_formula[var_df$Variable==var] <- formula_str
+      var_df$num[var_df$Variable==var] <- ii
+      num_since_last_change <- 0
+      file_str <- paste(readLines(txt_file), collapse="\n")
+      writeLines(paste(file_str,"\n",'num: ',ii,' var: ',var,' metric: ', metric,' num_passed: ', num_passed, 
+                       ' formula_str: ',formula_str,sep=""),
+                 txt_file)
+    }
+    
+    # Print something to the screen to see general progress
+    num_since_last_change <- num_since_last_change + 1
+    print(paste('num: ',ii,' var: ',var,' metric: ', metric,' num_passed: ', 
+                num_passed," num_since_last_change: ",num_since_last_change,sep="" ))
+    
+    # If the loop has been going on for too long, or if p-values aren't low anymore, just break out of it
+    if(num_since_last_change == num_no_change){
+      break
+    }
+  }
+  
+  # Output the var_df
+  var_df
+}
+
+```
+The model that was created had an average RMSE of 966.7 over the 200 tests.  So, significatntly better than the more simple models.
+
+## XGBoost
+I've heard good things about using XGBoost from people at work, so I thought it would be fun to try it out here.  I'll try it out using the same methodology as with the other approaches.
+```{r}
+# Create training and test dtaa
+seed <- 1
+prop_test <- .1
+set.seed(seed)
+indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+validation = data[indices,]
+train = data[-indices,]
+
+# XG Boost needs a DMatrix
+vals <- c('OverTime','MaritalStatus')
+target <- as.numeric(train$Attrition)*-1 +2
+feature_data <- train[,vals]
+feature_matrix <- as.matrix(as.data.frame(lapply(feature_data,as.numeric)))
+dtrain <- xgb.DMatrix(data = feature_matrix, label = target)
+
+# Create the model
+bstDMatrix <- xgboost(data = dtrain, nthread = 2, nrounds = 10, objective = "binary:logistic")
+
+# Predict using the model
+validation_matrix <- as.matrix(as.data.frame(lapply(validation[,vals],as.numeric)))
+validation_dmatrix <- xgb.DMatrix(data = validation_matrix)
+pred <- predict(bstDMatrix, validation_dmatrix)
+prediction <- as.numeric(pred > 0.5)
+
+# Evaluate the predictions
+validation_label <- as.numeric(validation[, 'Attrition'])*-1+2
+sens <- sum(prediction == 1 & validation_label == 1) / sum(prediction == 1)
+spec <- sum(prediction == 0 & validation_label == 0) / sum(prediction == 0)
+sens + spec
+```
+
+1.58 is a pretty good Sensitivity + Specificity score.  Good enough to try generating a larger model.
+<br>
+<br>
+```{r}
+add_vars_xgboost_attrition <- function(data, all_vars, seed, prop_test, thresh, num_tests, 
+                                       num_no_change, start_formula, start_num, txt_file, 
+                                       start_best, amount_to_improve){
+  # First get a list of the p-values
+  var_df <- data.frame(Variables=all_vars)
+  var_df$num <- 0
+  var_df$p <- 0
+  var_df$metric <- 0
+  var_df$num_passed <- 0
+  var_df$to_use <- 0
+  var_df$curr_formula <- ""
+  num_since_last_change <- 0
+  nvar <- length(all_vars)
+  for(ii in 1:nvar){
+    var<-all_vars[ii]
+    test <- cor.test(unclass(data[,'Attrition']),unclass(data[,var]))
+    var_df$p[ii] <- test$p.value
+  }
+  
+  # Sort the p-values
+  sort_order <- order(var_df$p,decreasing = FALSE)
+  
+  # Loop through all of the columns, add the next variable to the list
+  if (start_formula==''){
+    vars_to_use <- c()
+  } else {
+    vars_to_use <- unlist(strsplit(start_formula, "\\+"))
+  }
+  best_passed <- 0
+  best_metric <- start_best
+  for (ii in start_num:nvar){
+    var<-all_vars[sort_order[ii]]
+    vars_to_use_loop <- c(vars_to_use,var)
+    curr_p <- var_df$p[sort_order[ii]]
+    if(curr_p > 0.001){ # Don't want the variables to not be super predictive
+      break
+    }
+    if(sum(data[,var]!=0)<length(data[,var])*0.05){
+      next # Don't want too few numbers
+    }
+    if(class(data[,var]) == 'factor'){
+      next # XGBoost only seems to handle numeric data well
+    }
+    
+    metric <- 0
+    num_passed <- 0
+    set.seed(seed) # re-setting the seed for some sort of predictability
+    for (jj in 1:num_tests){
+      # Split data into training and test
+      indices = sample(seq(1:nrow(data)),round(prop_test*nrow(data)))
+      validation = data[indices,]
+      train = data[-indices,]
+      
+      # Call the xgboost algorithm
+      target <- as.numeric(train$Attrition)*-1 +2
+      feature_data <- train[,vars_to_use_loop]
+      feature_matrix <- as.matrix(feature_data)
+      dtrain <- xgb.DMatrix(data = feature_matrix, label = target)
+      msg_output <- capture.output({
+        bstDMatrix <- xgboost(data = dtrain, nthread = 2, nrounds = 10, objective = "binary:logistic")
+      })
+        
+      # Use the resulting model for predictions
+      validation_matrix <- as.matrix(validation[,vars_to_use_loop])
+      validation_dmatrix <- xgb.DMatrix(data = validation_matrix)
+      pred <- predict(bstDMatrix, validation_dmatrix)
+      prediction <- as.numeric(pred > 0.5)
+      
+      # Determine how good the predictions are
+      validation_label <- as.numeric(validation[, 'Attrition'])*-1+2
+      sens <- sum(prediction == 1 & validation_label == 1) / sum(prediction == 1)
+      if(is.na(sens)){
+        sens <- 0
+      }
+      spec <- sum(prediction == 0 & validation_label == 0) / sum(prediction == 0)
+      if(is.na(spec)){
+        spec <- 0
+      }
+      if(sens>thresh && spec>thresh) {
+        num_passed <- num_passed + 1
+      }
+      metric <- metric + sens + spec
+      
+    }
+    metric <- metric / num_tests
+    var_df$metric[var_df$Variable==var] <- metric
+    var_df$num_passed[var_df$Variable==var] <- num_passed
+    var_df$num[var_df$Variable==var] <- ii
+    
+    # Check if that variable should be added
+    if(best_metric+amount_to_improve<metric || num_passed<=num_tests*.01){
+      best_passed = num_passed
+      best_metric <- metric
+      vars_to_use <- c(vars_to_use,var)
+      var_df$to_use[var_df$Variable==var] <- 1
+      var_df$curr_formula[var_df$Variable==var] <- paste(vars_to_use,collapse="+")
+      num_since_last_change <- 0
+      file_str <- paste(readLines(txt_file), collapse="\n")
+      writeLines(paste(file_str,"\n",'num: ',ii,' var: ',var, 
+                       ' metric: ', metric, ' num_passed: ', num_passed, 
+                       ' formula_str: ',paste(vars_to_use,collapse="+"),sep=""),
+                 txt_file)
+    }
+    
+    # Print something to the screen to see general progress
+    print(paste('num: ',ii,' var: ',var,' metric: ', metric,
+                ' num_since_last_change: ',num_since_last_change,
+                ' num_passed: ', num_passed, sep=""))
+    
+    # If the loop has been going on for too long, just break out of it
+    num_since_last_change <- num_since_last_change + 1
+    if(num_since_last_change == num_no_change){
+      break
+    }
+  }
+  
+  # Output the var_df
+  var_df
+}
+```
+
+The approach only seemed to select a model with 2 variables.  And when testing that 2 variable model out with 200 tests, only 53 got both sensitivity and specificity above 60% with an average metric of 1.362.  This isn't very good.  Maybe I'm using XG Boost wrong?
